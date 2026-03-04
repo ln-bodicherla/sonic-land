@@ -1,0 +1,76 @@
+# SonicLand Configuration
+# Place this file at ~/.config/sonicland/sonicland.conf
+
+# ─── General ───────────────────────────────────────────────
+general.gaps_in = 5
+general.gaps_out = 10
+general.border_size = 2
+# Which monitor(s) to auto-tile on:
+#   "all"       — tile on all monitors (default)
+#   "built-in"  — only the built-in/laptop display
+#   "external"  — only external displays
+#   "LG FULL HD" — match by monitor name (case-insensitive substring)
+general.monitor = all
+
+# ─── Animations ────────────────────────────────────────────
+animation.enabled = true
+animation.duration = 200
+animation.curve = easeOut
+
+# ─── Window Rules ──────────────────────────────────────────
+# Format: windowrule = <action>, <condition>
+# Actions: float, workspace <n>, opacity <0-1>, monitor <n>
+# Conditions: app:<name>, bundle:<id>, title:<regex>
+windowrule = float, app:Spotify
+windowrule = float, app:Calculator
+windowrule = float, app:System Preferences
+windowrule = float, app:System Settings
+windowrule = workspace 3, app:Slack
+windowrule = workspace 4, app:Discord
+
+# ─── Keybindings ───────────────────────────────────────────
+# Format: bind = <modifiers+key>, <action>
+# Modifiers: cmd, alt (option), shift, ctrl
+# Actions: focus_left, focus_right, focus_up, focus_down,
+#          move_left, move_right, move_up, move_down,
+#          workspace <n>, move_to_workspace <n>,
+#          toggle_float, toggle_layout, reload_config
+
+# Focus
+bind = cmd+alt+h, focus_left
+bind = cmd+alt+l, focus_right
+bind = cmd+alt+j, focus_down
+bind = cmd+alt+k, focus_up
+
+# Move windows
+bind = cmd+alt+shift+h, move_left
+bind = cmd+alt+shift+l, move_right
+bind = cmd+alt+shift+j, move_down
+bind = cmd+alt+shift+k, move_up
+
+# Workspaces
+bind = cmd+alt+1, workspace 1
+bind = cmd+alt+2, workspace 2
+bind = cmd+alt+3, workspace 3
+bind = cmd+alt+4, workspace 4
+bind = cmd+alt+5, workspace 5
+bind = cmd+alt+6, workspace 6
+bind = cmd+alt+7, workspace 7
+bind = cmd+alt+8, workspace 8
+bind = cmd+alt+9, workspace 9
+
+# Move to workspace
+bind = cmd+alt+shift+1, move_to_workspace 1
+bind = cmd+alt+shift+2, move_to_workspace 2
+bind = cmd+alt+shift+3, move_to_workspace 3
+bind = cmd+alt+shift+4, move_to_workspace 4
+bind = cmd+alt+shift+5, move_to_workspace 5
+bind = cmd+alt+shift+6, move_to_workspace 6
+bind = cmd+alt+shift+7, move_to_workspace 7
+bind = cmd+alt+shift+8, move_to_workspace 8
+bind = cmd+alt+shift+9, move_to_workspace 9
+
+# Toggle
+bind = cmd+alt+f, toggle_float
+bind = cmd+alt+space, toggle_layout
+bind = cmd+alt+r, reload_config
