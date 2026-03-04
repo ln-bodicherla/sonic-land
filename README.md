@@ -13,8 +13,12 @@ A fast, keyboard-driven tiling window manager for macOS. SonicLand uses BSP (Bin
 
 1. Download `SonicLand.dmg` from the [latest release](https://github.com/ln-bodicherla/sonic-land/releases/latest)
 2. Open the DMG and drag `SonicLand.app` to your Applications folder
-3. Launch SonicLand
-4. Grant accessibility permission when prompted
+3. If macOS says the app is "damaged" or can't be opened, run:
+   ```bash
+   xattr -cr /Applications/SonicLand.app
+   ```
+4. Launch SonicLand
+5. Grant accessibility permission when prompted
 
 ### From Source
 
