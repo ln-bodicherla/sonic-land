@@ -27,10 +27,8 @@ final class ConfigParser {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            // Skip empty lines and comments
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
 
-            // Parse key = value
             if let equalsIndex = trimmed.firstIndex(of: "=") {
                 let key = trimmed[trimmed.startIndex..<equalsIndex].trimmingCharacters(in: .whitespaces).lowercased()
                 let value = trimmed[trimmed.index(after: equalsIndex)...].trimmingCharacters(in: .whitespaces)
@@ -45,6 +43,16 @@ final class ConfigParser {
                     config.general.borderSize = CGFloat(Double(value) ?? 2)
                 case "general.monitor":
                     config.general.monitor = value
+                case "general.layout":
+                    config.general.defaultLayout = value.lowercased()
+                case "general.master_ratio":
+                    config.general.masterRatio = CGFloat(Double(value) ?? 0.55)
+                case "general.master_count":
+                    config.general.masterCount = Int(value) ?? 1
+                case "general.focus_follows_mouse":
+                    config.general.focusFollowsMouse = value.lowercased() == "true"
+                case "general.dnd":
+                    config.general.dndMode = value.lowercased() == "true"
 
                 // Animation
                 case "animation.enabled":
@@ -54,7 +62,25 @@ final class ConfigParser {
                 case "animation.curve":
                     config.animation.curve = EasingCurve(rawValue: value.lowercased()) ?? .easeOut
 
-                // Keybindings: bind = cmd+alt+h, focus_left
+                // Session
+                case "session.enabled":
+                    config.sessionRestore.enabled = value.lowercased() == "true"
+                case "session.restore_apps":
+                    config.sessionRestore.restoreApps = value.lowercased() == "true"
+                case "session.save_on_quit":
+                    config.sessionRestore.saveOnQuit = value.lowercased() == "true"
+
+                // Overlay
+                case "overlay.workspace_name":
+                    config.overlay.showWorkspaceName = value.lowercased() == "true"
+                case "overlay.layout_name":
+                    config.overlay.showLayoutName = value.lowercased() == "true"
+                case "overlay.focus_ring":
+                    config.overlay.showFocusRing = value.lowercased() == "true"
+                case "overlay.workspace_map":
+                    config.overlay.showWorkspaceMap = value.lowercased() == "true"
+
+                // Keybindings
                 case "bind":
                     let parts = value.split(separator: ",", maxSplits: 1)
                     if parts.count == 2 {
@@ -63,17 +89,82 @@ final class ConfigParser {
                         config.bindings.append(ConfigModel.BindingConfig(keys: keys, action: action))
                     }
 
-                // Window rules: windowrule = float, app:Spotify
+                // Window rules
                 case "windowrule":
                     config.windowRules.append(value)
 
+                // Context rules
+                case "contextrule":
+                    config.contextRules.append(value)
+
+                // Scratchpads
+                case "scratchpad":
+                    if let sp = parseScratchpad(value) {
+                        config.scratchpads.append(sp)
+                    }
+
+                // Workspace config: workspace.1.name = Dev
                 default:
-                    NSLog("[SonicLand] Unknown config key: \(key)")
+                    if key.hasPrefix("workspace.") {
+                        parseWorkspaceConfig(key: key, value: value, config: &config)
+                    } else {
+                        NSLog("[SonicLand] Unknown config key: \(key)")
+                    }
                 }
             }
         }
 
-        NSLog("[SonicLand] Config loaded: \(config.bindings.count) bindings, \(config.windowRules.count) rules")
+        NSLog("[SonicLand] Config loaded: \(config.bindings.count) bindings, \(config.windowRules.count) rules, \(config.scratchpads.count) scratchpads")
         return config
+    }
+
+    private func parseScratchpad(_ value: String) -> ConfigModel.ScratchpadConfig? {
+        // Format: name, app:Terminal or name, bundle:com.apple.Terminal
+        let parts = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count >= 2 else { return nil }
+
+        var sp = ConfigModel.ScratchpadConfig(name: parts[0])
+
+        for part in parts.dropFirst() {
+            let kv = part.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard kv.count == 2 else { continue }
+            switch kv[0].lowercased() {
+            case "app": sp.app = kv[1]
+            case "bundle": sp.bundleID = kv[1]
+            case "command": sp.command = kv[1]
+            case "width": sp.width = CGFloat(Double(kv[1]) ?? 800)
+            case "height": sp.height = CGFloat(Double(kv[1]) ?? 600)
+            case "center": sp.center = kv[1].lowercased() == "true"
+            case "autohide": sp.autoHide = kv[1].lowercased() == "true"
+            default: break
+            }
+        }
+
+        return sp
+    }
+
+    private func parseWorkspaceConfig(key: String, value: String, config: inout ConfigModel) {
+        // workspace.1.name = Dev
+        let parts = key.split(separator: ".")
+        guard parts.count == 3,
+              let wsID = Int(parts[1]) else { return }
+
+        var wsConfig = config.workspaceConfig[wsID] ?? ConfigModel.WorkspaceConfig()
+        let prop = String(parts[2])
+
+        switch prop {
+        case "name": wsConfig.name = value
+        case "layout": wsConfig.layout = value.lowercased()
+        case "type": wsConfig.type = value.lowercased()
+        case "master_ratio": wsConfig.masterRatio = CGFloat(Double(value) ?? 0.55)
+        case "master_count": wsConfig.masterCount = Int(value)
+        case "gaps_in": wsConfig.gapsIn = CGFloat(Double(value) ?? 5)
+        case "gaps_out": wsConfig.gapsOut = CGFloat(Double(value) ?? 10)
+        case "monitor": wsConfig.monitor = Int(value)
+        case "startup": wsConfig.startupActions.append(value)
+        default: break
+        }
+
+        config.workspaceConfig[wsID] = wsConfig
     }
 }

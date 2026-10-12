@@ -67,8 +67,52 @@ final class MonitorManager {
         }
     }
 
-    @objc private func screensDidChange(_ notification: Notification) {
-        NSLog("[SonicLand] Screen configuration changed.")
-        refresh()
+    /// Detect monitor profile based on connected displays.
+    var monitorProfile: String {
+        if monitors.count == 1 {
+            let name = monitors[0].name.lowercased()
+            if name.contains("built-in") || name.contains("retina") {
+                return "undocked"
+            }
+            return "single-external"
+        } else if monitors.count > 1 {
+            return "docked"
+        }
+        return "unknown"
     }
+
+    /// Check if we're in clamshell mode (external monitor, no built-in).
+    var isClamshellMode: Bool {
+        guard monitors.count >= 1 else { return false }
+        return !monitors.contains { $0.name.lowercased().contains("built-in") || $0.name.lowercased().contains("retina") }
+            && monitors.count >= 1
+    }
+
+    weak var delegate: MonitorManagerDelegate?
+
+    @objc private func screensDidChange(_ notification: Notification) {
+        let oldCount = monitors.count
+        let oldProfile = monitorProfile
+        refresh()
+
+        if monitors.count != oldCount {
+            if monitors.count > oldCount {
+                EventLog.shared.log(.monitorConnected,
+                    "Monitor connected (now \(monitors.count) monitors)",
+                    details: ["profile": monitorProfile])
+            } else {
+                EventLog.shared.log(.monitorDisconnected,
+                    "Monitor disconnected (now \(monitors.count) monitors)",
+                    details: ["profile": monitorProfile])
+            }
+        }
+
+        if monitorProfile != oldProfile {
+            delegate?.monitorManager(self, profileChangedTo: monitorProfile)
+        }
+    }
+}
+
+protocol MonitorManagerDelegate: AnyObject {
+    func monitorManager(_ manager: MonitorManager, profileChangedTo profile: String)
 }

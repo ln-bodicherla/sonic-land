@@ -261,3 +261,14 @@ struct GapConfig {
         self.outer = outer
     }
 }
+
+extension CGRect {
+    func insetBy(gaps: GapConfig) -> CGRect {
+        CGRect(
+            x: origin.x + gaps.outer,
+            y: origin.y + gaps.outer,
+            width: width - gaps.outer * 2,
+            height: height - gaps.outer * 2
+        )
+    }
+}

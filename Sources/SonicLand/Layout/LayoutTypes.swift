@@ -17,3 +17,16 @@ enum SplitDirection: String, Codable {
 enum Direction {
     case left, right, up, down
 }
+
+/// Rotation direction for tree operations.
+enum RotationDirection {
+    case clockwise
+    case counterClockwise
+}
+
+/// Resize axis for grow/shrink operations.
+enum ResizeAxis {
+    case horizontal
+    case vertical
+    case both
+}

@@ -43,7 +43,6 @@ final class InputManager {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
-        // Health check timer — re-enable if system disables the tap
         healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.checkTapHealth()
         }
@@ -78,11 +77,11 @@ final class InputManager {
                 DispatchQueue.main.async { [weak self] in
                     self?.actionHandler?(binding.action)
                 }
-                return nil // Suppress the event
+                return nil
             }
         }
 
-        return event // Pass through unmatched events
+        return event
     }
 
     // MARK: - Private
@@ -107,7 +106,6 @@ final class InputManager {
             bindings.append(KeyBinding(modifiers: keys.modifiers, keyCode: keys.keyCode, action: action))
         }
 
-        // Add default bindings if none configured
         if bindings.isEmpty {
             loadDefaultBindings()
         }
@@ -127,6 +125,23 @@ final class InputManager {
             ("cmd+alt+shift+l", .moveRight),
             ("cmd+alt+shift+j", .moveDown),
             ("cmd+alt+shift+k", .moveUp),
+            // Resize
+            ("cmd+alt+equal", .growWidth),
+            ("cmd+alt+minus", .shrinkWidth),
+            ("cmd+alt+shift+equal", .growHeight),
+            ("cmd+alt+shift+minus", .shrinkHeight),
+            ("cmd+alt+0", .normalizeSize),
+            // Master
+            ("cmd+alt+i", .increaseMasterRatio),
+            ("cmd+alt+d", .decreaseMasterRatio),
+            ("cmd+alt+shift+i", .increaseMasterCount),
+            ("cmd+alt+shift+d", .decreaseMasterCount),
+            // Layout
+            ("cmd+alt+f", .toggleFloat),
+            ("cmd+alt+space", .cycleLayout),
+            ("cmd+alt+m", .toggleMonocle),
+            ("cmd+alt+shift+f", .togglePseudoFullscreen),
+            ("cmd+alt+shift+r", .rotateClockwise),
             // Workspaces
             ("cmd+alt+1", .switchWorkspace(1)),
             ("cmd+alt+2", .switchWorkspace(2)),
@@ -137,7 +152,6 @@ final class InputManager {
             ("cmd+alt+7", .switchWorkspace(7)),
             ("cmd+alt+8", .switchWorkspace(8)),
             ("cmd+alt+9", .switchWorkspace(9)),
-            // Move to workspace
             ("cmd+alt+shift+1", .moveToWorkspace(1)),
             ("cmd+alt+shift+2", .moveToWorkspace(2)),
             ("cmd+alt+shift+3", .moveToWorkspace(3)),
@@ -147,9 +161,10 @@ final class InputManager {
             ("cmd+alt+shift+7", .moveToWorkspace(7)),
             ("cmd+alt+shift+8", .moveToWorkspace(8)),
             ("cmd+alt+shift+9", .moveToWorkspace(9)),
-            // Toggle
-            ("cmd+alt+f", .toggleFloat),
-            ("cmd+alt+space", .toggleLayoutDirection),
+            ("cmd+alt+tab", .nextWorkspace),
+            ("cmd+alt+shift+tab", .previousWorkspace),
+            ("cmd+alt+grave", .recentWorkspace),
+            // System
             ("cmd+alt+r", .reloadConfig),
         ]
 
@@ -171,7 +186,6 @@ private func eventTapCallback(
 ) -> Unmanaged<CGEvent>? {
     guard let refcon = refcon else { return Unmanaged.passRetained(event) }
 
-    // Handle tap disabled by timeout
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         _ = Unmanaged<InputManager>.fromOpaque(refcon).takeUnretainedValue()
         NSLog("[SonicLand] Event tap disabled by system. Will re-enable on next health check.")
@@ -186,5 +200,5 @@ private func eventTapCallback(
     if let result = manager.handleKeyEvent(event) {
         return Unmanaged.passRetained(result)
     }
-    return nil // Event was consumed
+    return nil
 }

@@ -18,6 +18,13 @@ final class WindowNode {
     var isModeFloated: Bool
     var isMinimized: Bool
     var isFullscreen: Bool
+    var isPseudoFullscreen: Bool
+    var isPinned: Bool           // Pinned to master area
+    var isSticky: Bool           // Visible across all workspaces
+    var tags: Set<String>        // User-defined tags/categories
+    var alwaysFloat: Bool        // Rule-based permanent float
+    var floatGeometry: CGRect?   // Preferred floating position/size
+    var centerOnOpen: Bool       // Center when opened as float
 
     /// Whether the window has drifted from its target (e.g., user dragged it).
     var hasDrifted: Bool {
@@ -44,5 +51,12 @@ final class WindowNode {
         self.isModeFloated = false
         self.isMinimized = false
         self.isFullscreen = false
+        self.isPseudoFullscreen = false
+        self.isPinned = false
+        self.isSticky = false
+        self.tags = []
+        self.alwaysFloat = false
+        self.floatGeometry = nil
+        self.centerOnOpen = false
     }
 }

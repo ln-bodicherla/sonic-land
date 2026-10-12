@@ -11,30 +11,161 @@ general.border_size = 2
 #   "external"  — only external displays
 #   "LG FULL HD" — match by monitor name (case-insensitive substring)
 general.monitor = all
+# Default layout mode: bsp, masterStack, columns, rows, monocle, floating
+general.layout = bsp
+# Master area ratio (0.1 - 0.9, used by masterStack layout)
+general.master_ratio = 0.55
+# Number of windows in master area
+general.master_count = 1
+# Focus follows mouse (experimental)
+general.focus_follows_mouse = false
+# Do not disturb mode — suppress auto-retile
+general.dnd = false
 
 # ─── Animations ────────────────────────────────────────────
 animation.enabled = true
 animation.duration = 200
 animation.curve = easeOut
 
+# ─── Session Persistence ──────────────────────────────────
+session.enabled = true
+session.save_on_quit = true
+session.restore_apps = false
+
+# ─── Visual Overlays ──────────────────────────────────────
+overlay.workspace_name = true
+overlay.layout_name = true
+overlay.focus_ring = false
+overlay.workspace_map = true
+
+# ─── Workspace Configuration ──────────────────────────────
+# Per-workspace settings: workspace.<id>.<property> = <value>
+# Properties: name, layout, type, master_ratio, master_count, gaps_in, gaps_out, monitor, startup
+workspace.1.name = Dev
+workspace.1.layout = masterStack
+workspace.1.type = coding
+workspace.1.master_ratio = 0.6
+
+workspace.2.name = Web
+workspace.2.layout = bsp
+workspace.2.type = research
+
+workspace.3.name = Chat
+workspace.3.layout = columns
+workspace.3.type = communication
+
+workspace.4.name = Design
+workspace.4.layout = bsp
+workspace.4.type = design
+
+# workspace.5.startup = open -a "Spotify"
+
 # ─── Window Rules ──────────────────────────────────────────
 # Format: windowrule = <action>, <condition>
-# Actions: float, workspace <n>, opacity <0-1>, monitor <n>
-# Conditions: app:<name>, bundle:<id>, title:<regex>
+#
+# Actions:
+#   float                    — Exclude from tiling
+#   workspace <n>            — Assign to workspace
+#   opacity <0-1>            — Set opacity (not yet implemented)
+#   monitor <n>              — Move to monitor
+#   pin / pin_master         — Pin to master area
+#   hide                     — Hide on launch
+#   ignore                   — Don't manage this window
+#   sticky                   — Show on all workspaces
+#   tag <name>               — Assign a tag/category
+#   center                   — Center and float on open
+#   always_on_top            — Keep above tiled windows
+#   size <W>x<H>             — Set float size (e.g. size 800x600)
+#   geometry <X> <Y> <W> <H> — Set exact position and size
+#   layout <mode>            — Set workspace layout when app opens
+#
+# Conditions:
+#   app:<name>               — Match by app name (case-insensitive substring)
+#   bundle:<id>              — Match by bundle identifier
+#   title:<regex>            — Match by window title (regex)
+#   role:<role>              — Match by accessibility role
+#   title_contains:<text>    — Match by title substring
+#   title_not_contains:<text>— Exclude by title substring
+#
+# Multiple conditions: separate with &&
+#   windowrule = float, app:Safari && title_contains:PiP
+
 windowrule = float, app:Spotify
 windowrule = float, app:Calculator
 windowrule = float, app:System Preferences
 windowrule = float, app:System Settings
+windowrule = float, role:AXDialog
 windowrule = workspace 3, app:Slack
-windowrule = workspace 4, app:Discord
+windowrule = workspace 3, app:Discord
+windowrule = center, app:1Password
+windowrule = size 1000x800, app:Slack
+# windowrule = sticky, app:Music
+# windowrule = pin_master, app:Terminal
+# windowrule = tag work, bundle:com.apple.Safari
+
+# ─── Context Rules ─────────────────────────────────────────
+# Format: contextrule = <name>, <condition>, <action>
+#
+# Conditions:
+#   external_monitor         — External monitor is connected
+#   no_external_monitor      — No external monitor
+#   on_battery               — Running on battery
+#   on_power                 — Plugged in
+#   monitors:<count>         — Exact monitor count
+#   app_running:<bundle_id>  — Specific app is running
+#   app_not_running:<bundle_id>
+#
+# Actions:
+#   profile <name>           — Activate a profile
+#   layout <mode>            — Set default layout
+#   dnd_on / dnd_off         — Toggle do-not-disturb
+#   notify <message>         — Show notification
+
+# contextrule = undocked, no_external_monitor, layout columns
+# contextrule = docked, external_monitor, profile Work
+# contextrule = battery_saver, on_battery, dnd_on
+
+# ─── Scratchpads ───────────────────────────────────────────
+# Format: scratchpad = <name>, app:<name> or bundle:<id>, [options]
+# Options: width:<px>, height:<px>, center:true/false, autohide:true/false, command:<shell cmd>
+
+# scratchpad = terminal, app:Terminal, width:900, height:600, center:true, autohide:true
+# scratchpad = notes, bundle:com.apple.Notes, width:700, height:500
+# scratchpad = music, app:Spotify, width:1000, height:700, center:true
 
 # ─── Keybindings ───────────────────────────────────────────
 # Format: bind = <modifiers+key>, <action>
 # Modifiers: cmd, alt (option), shift, ctrl
-# Actions: focus_left, focus_right, focus_up, focus_down,
-#          move_left, move_right, move_up, move_down,
-#          workspace <n>, move_to_workspace <n>,
-#          toggle_float, toggle_layout, reload_config
+#
+# Focus:
+#   focus_left, focus_right, focus_up, focus_down
+#   focus_recent, focus_parent, focus_master
+#
+# Move:
+#   move_left, move_right, move_up, move_down
+#   move_to_master, pull_to_tile, eject_to_float
+#
+# Resize:
+#   grow_width, shrink_width, grow_height, shrink_height
+#   normalize
+#   increase_master_ratio, decrease_master_ratio
+#   increase_master_count, decrease_master_count
+#
+# Layout:
+#   toggle_float, toggle_layout, cycle_layout
+#   layout <mode>  (e.g. layout masterStack)
+#   rotate_cw, rotate_ccw
+#   toggle_fullscreen, toggle_monocle
+#
+# Workspace:
+#   workspace <n>, move_to_workspace <n>
+#   next_workspace, previous_workspace, recent_workspace
+#
+# Scratchpad:
+#   scratchpad <name>
+#
+# System:
+#   reload_config, toggle_gaps, toggle_overlay
 
 # Focus
 bind = cmd+alt+h, focus_left
@@ -47,6 +178,23 @@ bind = cmd+alt+shift+h, move_left
 bind = cmd+alt+shift+l, move_right
 bind = cmd+alt+shift+j, move_down
 bind = cmd+alt+shift+k, move_up
+bind = cmd+alt+shift+m, move_to_master
+
+# Resize
+bind = cmd+alt+equal, grow_width
+bind = cmd+alt+minus, shrink_width
+bind = cmd+alt+shift+equal, grow_height
+bind = cmd+alt+shift+minus, shrink_height
+bind = cmd+alt+0, normalize
+bind = cmd+alt+i, increase_master_ratio
+bind = cmd+alt+d, decrease_master_ratio
+
+# Layout
+bind = cmd+alt+f, toggle_float
+bind = cmd+alt+space, cycle_layout
+bind = cmd+alt+m, toggle_monocle
+bind = cmd+alt+shift+f, toggle_fullscreen
+bind = cmd+alt+shift+r, rotate_cw
 
 # Workspaces
 bind = cmd+alt+1, workspace 1
@@ -70,7 +218,14 @@ bind = cmd+alt+shift+7, move_to_workspace 7
 bind = cmd+alt+shift+8, move_to_workspace 8
 bind = cmd+alt+shift+9, move_to_workspace 9
 
-# Toggle
-bind = cmd+alt+f, toggle_float
-bind = cmd+alt+space, toggle_layout
+bind = cmd+alt+tab, next_workspace
+bind = cmd+alt+shift+tab, previous_workspace
+bind = cmd+alt+grave, recent_workspace
+
+# Scratchpads (uncomment and configure above first)
+# bind = cmd+alt+t, scratchpad terminal
+# bind = cmd+alt+n, scratchpad notes
+
+# System
 bind = cmd+alt+r, reload_config
+bind = cmd+alt+g, toggle_gaps

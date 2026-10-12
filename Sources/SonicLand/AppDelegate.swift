@@ -14,11 +14,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ipcServer: IPCServer!
     private var pluginManager: PluginManager!
     private var tickLoop: TickLoop!
+    private var scratchpadManager: ScratchpadManager!
+    private var overlayManager: OverlayManager!
+    private var profileManager: ProfileManager!
+    private var sessionManager: SessionManager!
     private var isBootstrapping = false
     private var currentTilingMode: TilingMode = .sharedSpace
     private var tilingModeMenuItems: [TilingMode: NSMenuItem] = [:]
     private var isTilingEnabled = true
     private var toggleMenuItem: NSMenuItem!
+    private var gapsEnabled = true
+    private var savedGaps: GapConfig?
+    private var currentConfig: ConfigModel = ConfigModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard Permissions.ensureAccessibility() else {
@@ -37,10 +44,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NSLog("[SonicLand] Shutting down...")
+
+        // Save session on quit
+        if currentConfig.sessionRestore.saveOnQuit {
+            sessionManager?.saveSession(
+                workspaceManager: workspaceManager,
+                windowManager: windowManager,
+                tilingMode: currentTilingMode
+            )
+        }
+
         tickLoop?.stop()
         ipcServer?.stop()
         inputManager?.stop()
         configWatcher?.stop()
+        overlayManager?.hideAll()
     }
 
     // MARK: - Status Bar
@@ -49,7 +67,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = statusItem.button else { return }
 
-        // Create a small tiling-grid template image for the menu bar
         let iconSize: CGFloat = 18
         let img = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { rect in
             let inset: CGFloat = 2
@@ -60,15 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             NSColor.black.setFill()
 
-            // Left tile
             let left = NSRect(x: area.minX, y: area.minY, width: splitX - area.minX - gap / 2, height: area.height)
             NSBezierPath(roundedRect: left, xRadius: 1.5, yRadius: 1.5).fill()
 
-            // Top-right tile
             let topRight = NSRect(x: splitX + gap / 2, y: splitY + gap / 2, width: area.maxX - splitX - gap / 2, height: area.maxY - splitY - gap / 2)
             NSBezierPath(roundedRect: topRight, xRadius: 1.5, yRadius: 1.5).fill()
 
-            // Bottom-right tile
             let bottomRight = NSRect(x: splitX + gap / 2, y: area.minY, width: area.maxX - splitX - gap / 2, height: splitY - area.minY - gap / 2)
             NSBezierPath(roundedRect: bottomRight, xRadius: 1.5, yRadius: 1.5).fill()
 
@@ -95,6 +109,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modeItem.submenu = modeSubmenu
         menu.addItem(modeItem)
 
+        // Layout submenu
+        let layoutSubmenu = NSMenu()
+        for mode in LayoutMode.allCases {
+            let item = NSMenuItem(title: mode.displayName, action: #selector(layoutModeSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            layoutSubmenu.addItem(item)
+        }
+        let layoutItem = NSMenuItem(title: "Layout Mode", action: nil, keyEquivalent: "")
+        layoutItem.submenu = layoutSubmenu
+        menu.addItem(layoutItem)
+
+        // Profile submenu
+        let profileSubmenu = NSMenu()
+        let refreshProfiles = NSMenuItem(title: "Refresh", action: #selector(refreshProfileMenu(_:)), keyEquivalent: "")
+        refreshProfiles.target = self
+        profileSubmenu.addItem(refreshProfiles)
+        let profileItem = NSMenuItem(title: "Profiles", action: nil, keyEquivalent: "")
+        profileItem.submenu = profileSubmenu
+        menu.addItem(profileItem)
+
         menu.addItem(NSMenuItem.separator())
 
         toggleMenuItem = NSMenuItem(title: "Disable Tiling", action: #selector(toggleTiling), keyEquivalent: "")
@@ -115,15 +150,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Subsystems
 
     private func initializeSubsystems() {
-        // Load config first
         configParser = ConfigParser()
-        let config = configParser.loadConfig()
+        currentConfig = configParser.loadConfig()
+        let config = currentConfig
 
-        // Core managers — monitors and workspaces MUST be ready before window bootstrap
         monitorManager = MonitorManager()
         monitorManager.refresh()
+        monitorManager.delegate = self
 
-        // Load tiling mode: UserDefaults first, then derive from config
         if let savedRaw = UserDefaults.standard.string(forKey: TilingMode.defaultsKey),
            let saved = TilingMode(rawValue: savedRaw) {
             currentTilingMode = saved
@@ -132,40 +166,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSLog("[SonicLand] Tiling mode: \(currentTilingMode.menuTitle)")
 
-        // Only create workspaces for tiling-eligible monitors
         let tilingMonitors = monitorManager.tilingMonitors(filter: currentTilingMode.monitorFilter)
-        NSLog("[SonicLand] Tiling on \(tilingMonitors.count) monitor(s) (filter: \(currentTilingMode.monitorFilter)):")
-        for m in tilingMonitors {
-            NSLog("[SonicLand]   \(m.name)")
-        }
+        NSLog("[SonicLand] Tiling on \(tilingMonitors.count) monitor(s)")
 
         workspaceManager = WorkspaceManager(monitorManager: monitorManager)
         for monitor in tilingMonitors {
             workspaceManager.ensureDefaultWorkspace(for: monitor.id)
         }
 
+        // Apply workspace config from config file
+        workspaceManager.applyWorkspaceConfig(config.workspaceConfig)
+
         windowManager = WindowManager()
         layoutEngine = LayoutEngine(config: config)
         animationEngine = AnimationEngine(config: config)
         ruleEngine = RuleEngine(config: config)
+        overlayManager = OverlayManager()
+        scratchpadManager = ScratchpadManager()
+        profileManager = ProfileManager()
+        sessionManager = SessionManager()
 
-        // Suppress relayout during bootstrap
+        // Register scratchpads from config
+        for spConfig in config.scratchpads {
+            let sp = Scratchpad(
+                name: spConfig.name,
+                appName: spConfig.app,
+                bundleID: spConfig.bundleID,
+                command: spConfig.command,
+                defaultWidth: spConfig.width,
+                defaultHeight: spConfig.height,
+                centerOnShow: spConfig.center,
+                autoHideOnFocusLost: spConfig.autoHide
+            )
+            scratchpadManager.register(sp)
+        }
+
+        // Restore session if enabled
+        if config.sessionRestore.enabled {
+            if let session = sessionManager.loadSession() {
+                sessionManager.restoreWorkspaceMetadata(session: session, workspaceManager: workspaceManager)
+                NSLog("[SonicLand] Session metadata restored")
+            }
+        }
+
+        // Bootstrap windows
         isBootstrapping = true
         windowManager.delegate = self
         windowManager.bootstrap()
         isBootstrapping = false
 
-        // Determine which monitor IDs are tiling-eligible
         let tilingMonitorIDs = Set(tilingMonitors.map { $0.id })
-
-        // Assign all windows to their monitor's active workspace
-        // Group tiled windows by workspace
         var windowsByWorkspace: [Int: [CGWindowID]] = [:]
 
         for window in windowManager.allWindows {
             ruleEngine.applyRules(to: window, workspaceManager: workspaceManager)
 
-            // Find which monitor this window is on
             let windowMonitor = monitorManager.monitorContaining(rect: window.frame)
             let onTilingMonitor = windowMonitor.map { tilingMonitorIDs.contains($0.id) } ?? false
 
@@ -174,7 +229,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 window.isModeFloated = true
             }
 
-            // Assign to the active workspace for the window's monitor
             if window.workspaceID == 0 {
                 if let monitor = windowMonitor,
                    let wsID = workspaceManager.activeWorkspaceID(for: monitor.id) {
@@ -188,15 +242,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 workspaceManager.addWindow(window.windowID, to: window.workspaceID)
                 windowsByWorkspace[window.workspaceID, default: []].append(window.windowID)
             }
+
+            // Apply float geometry from rules
+            if window.isFloating, let geo = window.floatGeometry {
+                if window.centerOnOpen, let monitor = monitorManager.primaryMonitor {
+                    let x = monitor.visibleFrame.midX - geo.width / 2
+                    let y = monitor.visibleFrame.midY - geo.height / 2
+                    AccessibilityWrapper.setWindowFrame(window.axElement,
+                        frame: CGRect(x: x, y: y, width: geo.width, height: geo.height))
+                } else if geo.origin.x != 0 || geo.origin.y != 0 {
+                    AccessibilityWrapper.setWindowFrame(window.axElement, frame: geo)
+                }
+            }
         }
 
-        // Build fresh BSP tree for each workspace that has windows
+        // Build BSP trees for BSP-mode workspaces
         for (wsID, windowIDs) in windowsByWorkspace {
-            var tree = BSPTree()
-            for wid in windowIDs {
-                tree.insert(windowID: wid)
-            }
-            if var ws = workspaceManager.workspace(for: wsID) {
+            if var ws = workspaceManager.workspace(for: wsID), ws.layoutMode == .bsp {
+                var tree = BSPTree()
+                for wid in windowIDs {
+                    tree.insert(windowID: wid)
+                }
                 ws.layoutTree = tree
                 workspaceManager.updateWorkspace(ws)
             }
@@ -228,12 +294,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Plugin system
         pluginManager = PluginManager()
 
-        // Compute and APPLY the initial layout
-        // Compute and apply layout
+        // Initial layout
         recomputeAllLayouts()
         NSLog("[SonicLand] Initial layout applied.")
 
-        // Tick loop at 10Hz — check for window drift and re-tile
+        // Tick loop
         tickLoop = TickLoop(fps: 10) { [weak self] in
             self?.tick()
         }
@@ -245,19 +310,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func tick() {
         windowManager.refreshWindowStates()
 
-        // Don't re-tile while user is dragging (mouse button held down)
         let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
         if mouseDown { return }
 
-        // Check if any tiled window has been dragged away from its target
+        // Evaluate context rules periodically
+        let contextActions = ruleEngine.evaluateContextRules(monitorManager: monitorManager)
+        for action in contextActions {
+            handleContextAction(action)
+        }
+
+        // Auto-hide scratchpads on focus loss
+        if let activeWS = workspaceManager.activeWorkspace,
+           let focusedID = activeWS.focusedWindowID {
+            for window in windowManager.allWindows where window.windowID != focusedID {
+                scratchpadManager.handleFocusLost(windowID: window.windowID, windowManager: windowManager)
+            }
+        }
+
+        // Check for drift
         var needsRelayout = false
 
         for window in windowManager.allWindows where !window.isFloating && !window.isMinimized {
+            // Skip DND workspaces
+            if let ws = workspaceManager.workspace(for: window.workspaceID), ws.doNotDisturb {
+                continue
+            }
+
             guard window.hasDrifted else { continue }
 
             let dragCenter = CGPoint(x: window.frame.midX, y: window.frame.midY)
-
-            // Check for swap with another window (works in all modes)
             var bestSwapID: CGWindowID?
             var bestDistance: CGFloat = .greatestFiniteMagnitude
 
@@ -275,14 +356,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             if let swapID = bestSwapID {
-                // Swap in the dragged window's workspace tree
                 if var ws = workspaceManager.workspace(for: window.workspaceID) {
                     ws.layoutTree.swapWindows(window.windowID, swapID)
                     workspaceManager.updateWorkspace(ws)
-                    NSLog("[SonicLand] Swapped \(window.appName) with \(windowManager.window(for: swapID)?.appName ?? "?")")
+                    EventLog.shared.log(.windowSwapped,
+                        "Swapped \(window.appName) with \(windowManager.window(for: swapID)?.appName ?? "?")")
                 }
-                // If target is in a different workspace (cross-monitor swap in shared space),
-                // also swap in that workspace's tree
                 if let other = windowManager.window(for: swapID),
                    other.workspaceID != window.workspaceID {
                     if var otherWS = workspaceManager.workspace(for: other.workspaceID) {
@@ -319,45 +398,158 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard workspace.isVisible else { continue }
             guard let monitor = monitorManager.monitor(for: workspace.monitorID) else { continue }
 
-            // Rebuild BSP tree from current tiling-eligible windows in this workspace
             let tiledWindowIDs = workspace.windowIDs.filter { wid in
                 guard let w = windowManager.window(for: wid) else { return false }
-                return !w.isFloating && !w.isMinimized
+                return !w.isFloating && !w.isMinimized && !w.isPseudoFullscreen
             }
 
-            guard !tiledWindowIDs.isEmpty else { continue }
+            // Add sticky windows
+            let stickyIDs = workspaceManager.stickyWindows(windowManager: windowManager)
+                .filter { !tiledWindowIDs.contains($0) }
 
-            // Rebuild tree if it has stale windows or is missing windows
-            let treeIDs = Set(workspace.layoutTree.root.allWindowIDs)
-            let expectedIDs = Set(tiledWindowIDs)
-            if treeIDs != expectedIDs {
-                var newTree = BSPTree()
-                for wid in tiledWindowIDs {
-                    newTree.insert(windowID: wid)
+            let allTiledIDs = orderWindowIDs(tiledWindowIDs + stickyIDs, workspace: workspace)
+
+            guard !allTiledIDs.isEmpty else { continue }
+
+            let frames: [CGWindowID: CGRect]
+
+            if workspace.layoutMode == .bsp {
+                // Rebuild BSP tree if needed
+                let treeIDs = Set(workspace.layoutTree.root.allWindowIDs)
+                let expectedIDs = Set(allTiledIDs)
+                if treeIDs != expectedIDs {
+                    var newTree = BSPTree()
+                    for wid in allTiledIDs {
+                        newTree.insert(windowID: wid)
+                    }
+                    workspace.layoutTree = newTree
+                    workspaceManager.updateWorkspace(workspace)
                 }
-                workspace.layoutTree = newTree
-                workspaceManager.updateWorkspace(workspace)
+
+                let effectiveGaps = workspace.gapsOverride ?? GapConfig(inner: layoutEngine.gapsInner, outer: layoutEngine.gapsOuter)
+                frames = workspace.layoutTree.computeFrames(in: monitor.visibleFrame, gaps: effectiveGaps)
+            } else {
+                frames = layoutEngine.computeLayout(
+                    windowIDs: allTiledIDs,
+                    in: monitor.visibleFrame,
+                    workspace: workspace
+                )
             }
 
-            let frames = workspace.layoutTree.computeFrames(
-                in: monitor.visibleFrame,
-                gaps: GapConfig(inner: layoutEngine.gapsInner, outer: layoutEngine.gapsOuter)
-            )
+            applyFrames(frames)
 
-            for (windowID, targetFrame) in frames {
-                guard let window = windowManager.window(for: windowID) else { continue }
-
-                // Only move if significantly different
-                let dx = abs(window.frame.origin.x - targetFrame.origin.x)
-                let dy = abs(window.frame.origin.y - targetFrame.origin.y)
-                let dw = abs(window.frame.size.width - targetFrame.size.width)
-                let dh = abs(window.frame.size.height - targetFrame.size.height)
-
-                if dx > 2 || dy > 2 || dw > 2 || dh > 2 {
-                    AccessibilityWrapper.setWindowFrame(window.axElement, frame: targetFrame)
+            // Handle pseudo-fullscreen windows
+            for wid in workspace.windowIDs {
+                guard let w = windowManager.window(for: wid), w.isPseudoFullscreen else { continue }
+                let fullFrame = monitor.visibleFrame
+                if abs(w.frame.width - fullFrame.width) > 2 || abs(w.frame.height - fullFrame.height) > 2 {
+                    AccessibilityWrapper.setWindowFrame(w.axElement, frame: fullFrame)
                 }
-                window.targetFrame = targetFrame
+                w.targetFrame = fullFrame
             }
+        }
+    }
+
+    private func recomputeSharedSpaceLayout() {
+        let tilingMonitors = monitorManager.tilingMonitors(filter: currentTilingMode.monitorFilter)
+        guard tilingMonitors.count > 1 else {
+            recomputePerWorkspaceLayouts()
+            return
+        }
+
+        let tilingMonitorIDs = Set(tilingMonitors.map { $0.id })
+        let allTiledWindows = windowManager.allWindows.filter { !$0.isFloating && !$0.isMinimized && !$0.isPseudoFullscreen }
+        guard !allTiledWindows.isEmpty else { return }
+
+        var windowsPerMonitor: [UInt32: [WindowNode]] = [:]
+        for monitor in tilingMonitors {
+            windowsPerMonitor[monitor.id] = []
+        }
+
+        for window in allTiledWindows {
+            if let monitor = monitorManager.monitorContaining(rect: window.frame),
+               tilingMonitorIDs.contains(monitor.id) {
+                windowsPerMonitor[monitor.id]?.append(window)
+            } else {
+                windowsPerMonitor[tilingMonitors[0].id]?.append(window)
+            }
+        }
+
+        for monitor in tilingMonitors {
+            guard let wsID = workspaceManager.activeWorkspaceID(for: monitor.id),
+                  var workspace = workspaceManager.workspace(for: wsID) else { continue }
+
+            let monitorWindows = windowsPerMonitor[monitor.id] ?? []
+            let monitorWindowIDs = monitorWindows.map { $0.windowID }
+            let orderedIDs = orderWindowIDs(monitorWindowIDs, workspace: workspace)
+
+            let currentIDs = Set(workspace.windowIDs)
+            let newIDs = Set(orderedIDs)
+            if currentIDs != newIDs {
+                workspace.windowIDs = orderedIDs
+                if workspace.layoutMode == .bsp {
+                    var newTree = BSPTree()
+                    for wid in orderedIDs {
+                        newTree.insert(windowID: wid)
+                    }
+                    workspace.layoutTree = newTree
+                }
+            }
+            workspaceManager.updateWorkspace(workspace)
+
+            for window in monitorWindows {
+                window.workspaceID = wsID
+                window.monitorID = monitor.id
+            }
+
+            guard !orderedIDs.isEmpty else { continue }
+
+            let frames: [CGWindowID: CGRect]
+            if workspace.layoutMode == .bsp {
+                let effectiveGaps = workspace.gapsOverride ?? GapConfig(inner: layoutEngine.gapsInner, outer: layoutEngine.gapsOuter)
+                frames = workspace.layoutTree.computeFrames(in: monitor.visibleFrame, gaps: effectiveGaps)
+            } else {
+                frames = layoutEngine.computeLayout(
+                    windowIDs: orderedIDs,
+                    in: monitor.visibleFrame,
+                    workspace: workspace
+                )
+            }
+
+            applyFrames(frames)
+        }
+    }
+
+    /// Order window IDs with pinned windows first (for master-stack and similar layouts).
+    private func orderWindowIDs(_ windowIDs: [CGWindowID], workspace: Workspace) -> [CGWindowID] {
+        var pinned: [CGWindowID] = []
+        var normal: [CGWindowID] = []
+
+        for wid in windowIDs {
+            if let w = windowManager.window(for: wid), w.isPinned {
+                pinned.append(wid)
+            } else {
+                normal.append(wid)
+            }
+        }
+
+        return pinned + normal
+    }
+
+    /// Apply computed frames to actual windows.
+    private func applyFrames(_ frames: [CGWindowID: CGRect]) {
+        for (windowID, targetFrame) in frames {
+            guard let window = windowManager.window(for: windowID) else { continue }
+
+            let dx = abs(window.frame.origin.x - targetFrame.origin.x)
+            let dy = abs(window.frame.origin.y - targetFrame.origin.y)
+            let dw = abs(window.frame.size.width - targetFrame.size.width)
+            let dh = abs(window.frame.size.height - targetFrame.size.height)
+
+            if dx > 2 || dy > 2 || dw > 2 || dh > 2 {
+                AccessibilityWrapper.setWindowFrame(window.axElement, frame: targetFrame)
+            }
+            window.targetFrame = targetFrame
         }
     }
 
@@ -365,72 +557,249 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleAction(_ action: KeyAction) {
         switch action {
-        case .focusLeft:
-            focusDirection(.left)
-        case .focusRight:
-            focusDirection(.right)
-        case .focusUp:
-            focusDirection(.up)
-        case .focusDown:
-            focusDirection(.down)
-        case .moveLeft:
-            moveWindowDirection(.left)
-        case .moveRight:
-            moveWindowDirection(.right)
-        case .moveUp:
-            moveWindowDirection(.up)
-        case .moveDown:
-            moveWindowDirection(.down)
-        case .switchWorkspace(let id):
-            switchWorkspace(id)
-        case .moveToWorkspace(let id):
-            moveToWorkspace(id)
-        case .toggleFloat:
-            toggleFloat()
-        case .toggleLayoutDirection:
-            toggleLayoutDirection()
-        case .reloadConfig:
-            reloadConfig()
+        // Focus
+        case .focusLeft: focusDirection(.left)
+        case .focusRight: focusDirection(.right)
+        case .focusUp: focusDirection(.up)
+        case .focusDown: focusDirection(.down)
+        case .focusRecent: focusRecent()
+        case .focusParent: break // TODO: BSP parent navigation
+        case .focusMaster: focusMaster()
+
+        // Move
+        case .moveLeft: moveWindowDirection(.left)
+        case .moveRight: moveWindowDirection(.right)
+        case .moveUp: moveWindowDirection(.up)
+        case .moveDown: moveWindowDirection(.down)
+        case .moveToMaster: moveToMaster()
+        case .pullToTile: pullToTile()
+        case .ejectToFloat: ejectToFloat()
+
+        // Resize
+        case .growWidth: resizeWindow(axis: .horizontal, delta: 0.05)
+        case .shrinkWidth: resizeWindow(axis: .horizontal, delta: -0.05)
+        case .growHeight: resizeWindow(axis: .vertical, delta: 0.05)
+        case .shrinkHeight: resizeWindow(axis: .vertical, delta: -0.05)
+        case .normalizeSize: normalizeLayout()
+        case .increaseMasterRatio: adjustMasterRatio(delta: 0.05)
+        case .decreaseMasterRatio: adjustMasterRatio(delta: -0.05)
+        case .increaseMasterCount: adjustMasterCount(delta: 1)
+        case .decreaseMasterCount: adjustMasterCount(delta: -1)
+
+        // Workspace
+        case .switchWorkspace(let id): switchWorkspace(id)
+        case .moveToWorkspace(let id): moveToWorkspace(id)
+        case .nextWorkspace: nextWorkspace()
+        case .previousWorkspace: previousWorkspace()
+        case .recentWorkspace: recentWorkspace()
+
+        // Layout
+        case .toggleFloat: toggleFloat()
+        case .toggleLayoutDirection: toggleLayoutDirection()
+        case .cycleLayout: cycleLayout()
+        case .setLayout(let mode): setLayout(mode)
+        case .rotateClockwise: rotateWindows(.clockwise)
+        case .rotateCounterClockwise: rotateWindows(.counterClockwise)
+
+        // Fullscreen
+        case .togglePseudoFullscreen: togglePseudoFullscreen()
+        case .toggleMonocle: toggleMonocle()
+
+        // Scratchpad
+        case .toggleScratchpad(let name): toggleScratchpad(name)
+
+        // System
+        case .reloadConfig: reloadConfig()
+        case .toggleGaps: toggleGaps()
+        case .toggleOverlay: break
         }
     }
+
+    // MARK: - Focus Actions
 
     private func focusDirection(_ direction: Direction) {
         guard let currentWS = workspaceManager.activeWorkspace,
               let focusedID = currentWS.focusedWindowID else { return }
 
-        if let targetID = layoutEngine.findNeighbor(
-            of: focusedID, direction: direction, in: currentWS.layoutTree
-        ) {
-            if let window = windowManager.window(for: targetID) {
-                AccessibilityWrapper.focusWindow(window.axElement, pid: window.pid)
-                workspaceManager.setFocusedWindow(targetID, in: currentWS.id)
+        let targetID: CGWindowID?
+        if currentWS.layoutMode == .bsp {
+            targetID = layoutEngine.findNeighbor(of: focusedID, direction: direction, in: currentWS.layoutTree)
+        } else {
+            targetID = layoutEngine.findNeighbor(of: focusedID, direction: direction, in: currentWS.windowIDs)
+        }
+
+        if let targetID = targetID,
+           let window = windowManager.window(for: targetID) {
+            AccessibilityWrapper.focusWindow(window.axElement, pid: window.pid)
+            workspaceManager.setFocusedWindow(targetID, in: currentWS.id)
+
+            if currentConfig.overlay.showFocusRing, let frame = window.targetFrame ?? Optional(window.frame) {
+                overlayManager.showFocusRing(frame: frame)
             }
         }
     }
+
+    private func focusRecent() {
+        // Focus the most recent window in the workspace that isn't currently focused
+        guard let currentWS = workspaceManager.activeWorkspace,
+              let focusedID = currentWS.focusedWindowID else { return }
+
+        for wid in currentWS.windowIDs.reversed() {
+            if wid != focusedID, let window = windowManager.window(for: wid) {
+                AccessibilityWrapper.focusWindow(window.axElement, pid: window.pid)
+                workspaceManager.setFocusedWindow(wid, in: currentWS.id)
+                break
+            }
+        }
+    }
+
+    private func focusMaster() {
+        guard let currentWS = workspaceManager.activeWorkspace,
+              let firstID = currentWS.windowIDs.first,
+              let window = windowManager.window(for: firstID) else { return }
+
+        AccessibilityWrapper.focusWindow(window.axElement, pid: window.pid)
+        workspaceManager.setFocusedWindow(firstID, in: currentWS.id)
+    }
+
+    // MARK: - Move Actions
 
     private func moveWindowDirection(_ direction: Direction) {
         guard var currentWS = workspaceManager.activeWorkspace,
               let focusedID = currentWS.focusedWindowID else { return }
 
-        layoutEngine.moveWindow(focusedID, direction: direction, in: &currentWS.layoutTree)
+        if currentWS.layoutMode == .bsp {
+            layoutEngine.moveWindow(focusedID, direction: direction, in: &currentWS.layoutTree)
+        } else {
+            // Swap in window list
+            guard let idx = currentWS.windowIDs.firstIndex(of: focusedID) else { return }
+            let targetIdx: Int
+            switch direction {
+            case .left, .up: targetIdx = max(0, idx - 1)
+            case .right, .down: targetIdx = min(currentWS.windowIDs.count - 1, idx + 1)
+            }
+            if targetIdx != idx {
+                currentWS.windowIDs.swapAt(idx, targetIdx)
+            }
+        }
         workspaceManager.updateWorkspace(currentWS)
         recomputeAllLayouts()
     }
+
+    private func moveToMaster() {
+        guard var currentWS = workspaceManager.activeWorkspace,
+              let focusedID = currentWS.focusedWindowID,
+              let idx = currentWS.windowIDs.firstIndex(of: focusedID),
+              idx > 0 else { return }
+
+        currentWS.windowIDs.remove(at: idx)
+        currentWS.windowIDs.insert(focusedID, at: 0)
+
+        if let window = windowManager.window(for: focusedID) {
+            window.isPinned = true
+        }
+
+        workspaceManager.updateWorkspace(currentWS)
+
+        // Rebuild BSP tree for BSP mode
+        if currentWS.layoutMode == .bsp {
+            if var ws = workspaceManager.workspace(for: currentWS.id) {
+                var newTree = BSPTree()
+                for wid in ws.windowIDs {
+                    newTree.insert(windowID: wid)
+                }
+                ws.layoutTree = newTree
+                workspaceManager.updateWorkspace(ws)
+            }
+        }
+
+        recomputeAllLayouts()
+    }
+
+    private func pullToTile() {
+        guard var currentWS = workspaceManager.activeWorkspace,
+              let focusedID = currentWS.focusedWindowID,
+              let window = windowManager.window(for: focusedID),
+              window.isFloating else { return }
+
+        window.isFloating = false
+        window.alwaysFloat = false
+        layoutEngine.insertWindow(focusedID, into: &currentWS.layoutTree)
+        workspaceManager.updateWorkspace(currentWS)
+        recomputeAllLayouts()
+        EventLog.shared.log(.windowTiled, "Pulled \(window.appName) to tile")
+    }
+
+    private func ejectToFloat() {
+        guard var currentWS = workspaceManager.activeWorkspace,
+              let focusedID = currentWS.focusedWindowID,
+              let window = windowManager.window(for: focusedID),
+              !window.isFloating else { return }
+
+        window.isFloating = true
+        layoutEngine.removeWindow(focusedID, from: &currentWS.layoutTree)
+        workspaceManager.updateWorkspace(currentWS)
+        recomputeAllLayouts()
+        EventLog.shared.log(.windowFloated, "Ejected \(window.appName) to float")
+    }
+
+    // MARK: - Resize Actions
+
+    private func resizeWindow(axis: ResizeAxis, delta: CGFloat) {
+        guard var currentWS = workspaceManager.activeWorkspace,
+              let focusedID = currentWS.focusedWindowID else { return }
+
+        if currentWS.layoutMode == .bsp {
+            currentWS.layoutTree.adjustRatio(for: focusedID, delta: delta)
+            workspaceManager.updateWorkspace(currentWS)
+        } else if currentWS.layoutMode == .masterStack {
+            workspaceManager.adjustMasterRatio(for: currentWS.id, delta: delta)
+        }
+        recomputeAllLayouts()
+    }
+
+    private func normalizeLayout() {
+        guard var currentWS = workspaceManager.activeWorkspace else { return }
+
+        if currentWS.layoutMode == .bsp {
+            layoutEngine.normalizeRatios(in: &currentWS.layoutTree)
+            workspaceManager.updateWorkspace(currentWS)
+        } else {
+            workspaceManager.adjustMasterRatio(for: currentWS.id, delta: 0)
+            if var ws = workspaceManager.workspace(for: currentWS.id) {
+                ws.masterRatio = 0.5
+                workspaceManager.updateWorkspace(ws)
+            }
+        }
+        recomputeAllLayouts()
+    }
+
+    private func adjustMasterRatio(delta: CGFloat) {
+        guard let currentWS = workspaceManager.activeWorkspace else { return }
+        workspaceManager.adjustMasterRatio(for: currentWS.id, delta: delta)
+        recomputeAllLayouts()
+    }
+
+    private func adjustMasterCount(delta: Int) {
+        guard let currentWS = workspaceManager.activeWorkspace else { return }
+        workspaceManager.adjustMasterCount(for: currentWS.id, delta: delta)
+        recomputeAllLayouts()
+    }
+
+    // MARK: - Workspace Actions
 
     private func switchWorkspace(_ id: Int) {
         guard let currentWS = workspaceManager.activeWorkspace else { return }
         if currentWS.id == id { return }
 
-        // Hide current workspace windows
         for windowID in currentWS.windowIDs {
-            if let window = windowManager.window(for: windowID) {
+            if let window = windowManager.window(for: windowID), !window.isSticky {
                 AccessibilityWrapper.setWindowPosition(window.axElement, position: CGPoint(x: -10000, y: -10000))
             }
         }
 
         workspaceManager.switchTo(workspaceID: id)
 
-        // Show target workspace windows
         if let targetWS = workspaceManager.activeWorkspace {
             for windowID in targetWS.windowIDs {
                 if let window = windowManager.window(for: windowID) {
@@ -439,10 +808,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+
+            // Run startup actions for workspace
+            if !targetWS.startupActions.isEmpty {
+                for action in targetWS.startupActions {
+                    runStartupAction(action)
+                }
+            }
         }
 
         recomputeAllLayouts()
         pluginManager.onWorkspaceChanged(from: currentWS.id, to: id)
+
+        if currentConfig.overlay.showWorkspaceName,
+           let ws = workspaceManager.workspace(for: id) {
+            overlayManager.showWorkspaceName(ws.name)
+        }
+
+        if currentConfig.overlay.showWorkspaceMap {
+            let wsData = workspaceManager.allWorkspaces.map { ws in
+                (id: ws.id, name: ws.name, isActive: ws.id == id, windowCount: ws.windowIDs.count)
+            }
+            overlayManager.showWorkspaceMap(workspaces: wsData)
+        }
     }
 
     private func moveToWorkspace(_ id: Int) {
@@ -467,6 +855,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recomputeAllLayouts()
     }
 
+    private func nextWorkspace() {
+        if let id = workspaceManager.switchToNext() {
+            if let ws = workspaceManager.workspace(for: id) {
+                showWorkspaceSwitch(ws)
+            }
+            recomputeAllLayouts()
+        }
+    }
+
+    private func previousWorkspace() {
+        if let id = workspaceManager.switchToPrevious() {
+            if let ws = workspaceManager.workspace(for: id) {
+                showWorkspaceSwitch(ws)
+            }
+            recomputeAllLayouts()
+        }
+    }
+
+    private func recentWorkspace() {
+        if let id = workspaceManager.switchToRecent() {
+            if let ws = workspaceManager.workspace(for: id) {
+                showWorkspaceSwitch(ws)
+            }
+            recomputeAllLayouts()
+        }
+    }
+
+    private func showWorkspaceSwitch(_ ws: Workspace) {
+        // Hide/show windows for workspace switch
+        for otherWS in workspaceManager.allWorkspaces where !otherWS.isVisible {
+            for wid in otherWS.windowIDs {
+                if let w = windowManager.window(for: wid), !w.isSticky {
+                    AccessibilityWrapper.setWindowPosition(w.axElement, position: CGPoint(x: -10000, y: -10000))
+                }
+            }
+        }
+        for wid in ws.windowIDs {
+            if let w = windowManager.window(for: wid), let target = w.targetFrame {
+                AccessibilityWrapper.setWindowFrame(w.axElement, frame: target)
+            }
+        }
+
+        if currentConfig.overlay.showWorkspaceName {
+            overlayManager.showWorkspaceName(ws.name)
+        }
+    }
+
+    // MARK: - Layout Actions
+
     private func toggleFloat() {
         guard var currentWS = workspaceManager.activeWorkspace,
               let focusedID = currentWS.focusedWindowID,
@@ -476,11 +913,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if window.isFloating {
             layoutEngine.removeWindow(focusedID, from: &currentWS.layoutTree)
+            EventLog.shared.log(.windowFloated, "Floated \(window.appName)")
         } else {
             layoutEngine.insertWindow(focusedID, into: &currentWS.layoutTree)
+            EventLog.shared.log(.windowTiled, "Tiled \(window.appName)")
         }
         workspaceManager.updateWorkspace(currentWS)
-
         recomputeAllLayouts()
     }
 
@@ -493,17 +931,245 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recomputeAllLayouts()
     }
 
+    private func cycleLayout() {
+        guard let currentWS = workspaceManager.activeWorkspace else { return }
+        if let newMode = workspaceManager.cycleLayout(for: currentWS.id) {
+            recomputeAllLayouts()
+            pluginManager.onLayoutModeChanged(workspaceID: currentWS.id, mode: newMode)
+
+            if currentConfig.overlay.showLayoutName {
+                overlayManager.showLayoutName(newMode.displayName)
+            }
+        }
+    }
+
+    private func setLayout(_ modeStr: String) {
+        guard let mode = LayoutMode(rawValue: modeStr),
+              let currentWS = workspaceManager.activeWorkspace else { return }
+
+        workspaceManager.setLayoutMode(mode, for: currentWS.id)
+        recomputeAllLayouts()
+        pluginManager.onLayoutModeChanged(workspaceID: currentWS.id, mode: mode)
+
+        if currentConfig.overlay.showLayoutName {
+            overlayManager.showLayoutName(mode.displayName)
+        }
+    }
+
+    private func rotateWindows(_ direction: RotationDirection) {
+        guard var currentWS = workspaceManager.activeWorkspace,
+              currentWS.windowIDs.count > 1 else { return }
+
+        layoutEngine.rotateWindows(direction, in: &currentWS.windowIDs)
+
+        // Rebuild BSP tree if in BSP mode
+        if currentWS.layoutMode == .bsp {
+            var newTree = BSPTree()
+            for wid in currentWS.windowIDs {
+                newTree.insert(windowID: wid)
+            }
+            currentWS.layoutTree = newTree
+        }
+
+        workspaceManager.updateWorkspace(currentWS)
+        recomputeAllLayouts()
+    }
+
+    // MARK: - Fullscreen Actions
+
+    private func togglePseudoFullscreen() {
+        guard let currentWS = workspaceManager.activeWorkspace,
+              let focusedID = currentWS.focusedWindowID,
+              let window = windowManager.window(for: focusedID) else { return }
+
+        window.isPseudoFullscreen.toggle()
+        recomputeAllLayouts()
+    }
+
+    private func toggleMonocle() {
+        guard let currentWS = workspaceManager.activeWorkspace else { return }
+
+        if currentWS.layoutMode == .monocle {
+            workspaceManager.setLayoutMode(.bsp, for: currentWS.id)
+        } else {
+            workspaceManager.setLayoutMode(.monocle, for: currentWS.id)
+        }
+
+        recomputeAllLayouts()
+
+        if currentConfig.overlay.showLayoutName,
+           let ws = workspaceManager.workspace(for: currentWS.id) {
+            overlayManager.showLayoutName(ws.layoutMode.displayName)
+        }
+    }
+
+    // MARK: - Scratchpad
+
+    private func toggleScratchpad(_ name: String) {
+        let result = scratchpadManager.toggle(
+            name: name,
+            windowManager: windowManager,
+            monitorManager: monitorManager
+        )
+
+        if let windowID = result.windowID {
+            if result.action == .shown {
+                // Mark as floating and bring to front
+                if let window = windowManager.window(for: windowID) {
+                    window.isFloating = true
+                }
+            }
+        }
+    }
+
+    // MARK: - Gaps
+
+    private func toggleGaps() {
+        if gapsEnabled {
+            savedGaps = GapConfig(inner: layoutEngine.gapsInner, outer: layoutEngine.gapsOuter)
+            var config = currentConfig
+            config.general.gapsIn = 0
+            config.general.gapsOut = 0
+            layoutEngine.updateConfig(config)
+            gapsEnabled = false
+        } else {
+            if let saved = savedGaps {
+                var config = currentConfig
+                config.general.gapsIn = saved.inner
+                config.general.gapsOut = saved.outer
+                layoutEngine.updateConfig(config)
+            }
+            gapsEnabled = true
+        }
+        recomputeAllLayouts()
+    }
+
+    // MARK: - Context Actions
+
+    private func handleContextAction(_ action: ContextAction) {
+        switch action {
+        case .activateProfile(let name):
+            activateProfile(name)
+        case .setLayout(let mode):
+            if let ws = workspaceManager.activeWorkspace {
+                workspaceManager.setLayoutMode(mode, for: ws.id)
+                recomputeAllLayouts()
+            }
+        case .setGaps(let inner, let outer):
+            var config = currentConfig
+            config.general.gapsIn = inner
+            config.general.gapsOut = outer
+            layoutEngine.updateConfig(config)
+            recomputeAllLayouts()
+        case .enableDND:
+            if var ws = workspaceManager.activeWorkspaceMutable {
+                ws.doNotDisturb = true
+                workspaceManager.updateWorkspace(ws)
+            }
+        case .disableDND:
+            if var ws = workspaceManager.activeWorkspaceMutable {
+                ws.doNotDisturb = false
+                workspaceManager.updateWorkspace(ws)
+            }
+        case .moveAppToWorkspace(let bundleID, let wsID):
+            for w in windowManager.allWindows where w.bundleID == bundleID {
+                moveWindowToWorkspace(w.windowID, workspaceID: wsID)
+            }
+        case .hideApp(let bundleID):
+            for w in windowManager.allWindows where w.bundleID == bundleID {
+                AccessibilityWrapper.setWindowPosition(w.axElement, position: CGPoint(x: -10000, y: -10000))
+            }
+        case .showNotification(let msg):
+            overlayManager.showNotification(msg)
+        }
+    }
+
+    private func moveWindowToWorkspace(_ windowID: CGWindowID, workspaceID: Int) {
+        workspaceManager.moveWindow(windowID: windowID, to: workspaceID)
+        if var ws = workspaceManager.workspace(for: workspaceID) {
+            layoutEngine.insertWindow(windowID, into: &ws.layoutTree)
+            workspaceManager.updateWorkspace(ws)
+        }
+    }
+
+    // MARK: - Profile Actions
+
+    private func activateProfile(_ name: String) {
+        guard let profile = profileManager.activateProfile(name) else { return }
+
+        // Apply workspace names and layouts
+        for (id, wsName) in profile.workspaceNames {
+            workspaceManager.renameWorkspace(id, to: wsName)
+        }
+        for (id, layoutStr) in profile.workspaceLayouts {
+            if let mode = LayoutMode(rawValue: layoutStr) {
+                workspaceManager.setLayoutMode(mode, for: id)
+            }
+        }
+
+        // Apply gaps if set
+        if let gIn = profile.gapsInner, let gOut = profile.gapsOuter {
+            var config = currentConfig
+            config.general.gapsIn = gIn
+            config.general.gapsOut = gOut
+            layoutEngine.updateConfig(config)
+        }
+
+        // Register scratchpads
+        scratchpadManager.unregisterAll()
+        for sp in profile.scratchpads {
+            scratchpadManager.register(sp)
+        }
+
+        recomputeAllLayouts()
+        overlayManager.showNotification("Profile: \(name)")
+    }
+
+    // MARK: - Startup Actions
+
+    private func runStartupAction(_ action: String) {
+        let task = Process()
+        task.launchPath = "/bin/zsh"
+        task.arguments = ["-c", action]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+    }
+
+    // MARK: - Config Reload
+
     @objc private func reloadConfig() {
         NSLog("[SonicLand] Reloading configuration...")
-        let config = configParser.loadConfig()
+        currentConfig = configParser.loadConfig()
+        let config = currentConfig
+
         layoutEngine.updateConfig(config)
         inputManager.updateConfig(config)
         animationEngine.updateConfig(config)
         ruleEngine.updateConfig(config)
-        recomputeAllLayouts()
-        NSLog("[SonicLand] Configuration reloaded.")
-    }
 
+        // Update workspace configs
+        workspaceManager.applyWorkspaceConfig(config.workspaceConfig)
+
+        // Update scratchpads
+        scratchpadManager.unregisterAll()
+        for spConfig in config.scratchpads {
+            let sp = Scratchpad(
+                name: spConfig.name,
+                appName: spConfig.app,
+                bundleID: spConfig.bundleID,
+                command: spConfig.command,
+                defaultWidth: spConfig.width,
+                defaultHeight: spConfig.height,
+                centerOnShow: spConfig.center,
+                autoHideOnFocusLost: spConfig.autoHide
+            )
+            scratchpadManager.register(sp)
+        }
+
+        recomputeAllLayouts()
+        EventLog.shared.log(.configReloaded, "Configuration reloaded")
+    }
 
     // MARK: - Toggle Tiling
 
@@ -532,13 +1198,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         currentTilingMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: TilingMode.defaultsKey)
 
-        // Update checkmarks
         for (m, item) in tilingModeMenuItems {
             item.state = m == mode ? .on : .off
         }
 
         applyTilingMode()
         NSLog("[SonicLand] Switched tiling mode to: \(mode.menuTitle)")
+    }
+
+    @objc private func layoutModeSelected(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let mode = LayoutMode(rawValue: rawValue),
+              let currentWS = workspaceManager.activeWorkspace else { return }
+
+        workspaceManager.setLayoutMode(mode, for: currentWS.id)
+        recomputeAllLayouts()
+
+        if currentConfig.overlay.showLayoutName {
+            overlayManager.showLayoutName(mode.displayName)
+        }
+    }
+
+    @objc private func refreshProfileMenu(_ sender: NSMenuItem) {
+        guard let profileMenu = sender.menu else { return }
+
+        // Remove all items except the refresh item
+        while profileMenu.items.count > 1 {
+            profileMenu.removeItem(at: profileMenu.items.count - 1)
+        }
+
+        profileMenu.addItem(NSMenuItem.separator())
+
+        for profile in profileManager.allProfiles() {
+            let item = NSMenuItem(
+                title: profile.name,
+                action: #selector(profileSelected(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = profile.name
+            if profileManager.activeProfile == profile.name {
+                item.state = .on
+            }
+            profileMenu.addItem(item)
+        }
+    }
+
+    @objc private func profileSelected(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        activateProfile(name)
     }
 
     private func applyTilingMode() {
@@ -550,22 +1258,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let onTilingMonitor = windowMonitor.map { tilingMonitorIDs.contains($0.id) } ?? false
 
             if !onTilingMonitor && !window.isFloating {
-                // Float windows on non-tiling monitors
                 window.isFloating = true
                 window.isModeFloated = true
             } else if onTilingMonitor && window.isModeFloated {
-                // Unfloat windows that were mode-floated and are now on tiling monitors
                 window.isFloating = false
                 window.isModeFloated = false
             }
         }
 
-        // Rebuild workspaces for tiling monitors
         for monitor in tilingMonitors {
             workspaceManager.ensureDefaultWorkspace(for: monitor.id)
         }
 
-        // Rebuild BSP trees for all visible workspaces
         for var workspace in workspaceManager.allWorkspaces {
             guard workspace.isVisible else { continue }
 
@@ -585,95 +1289,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recomputeAllLayouts()
     }
 
-    private func recomputeSharedSpaceLayout() {
-        let tilingMonitors = monitorManager.tilingMonitors(filter: currentTilingMode.monitorFilter)
-        guard tilingMonitors.count > 1 else {
-            recomputePerWorkspaceLayouts()
-            return
-        }
-
-        let tilingMonitorIDs = Set(tilingMonitors.map { $0.id })
-
-        // Collect ALL non-floating, non-minimized windows
-        let allTiledWindows = windowManager.allWindows.filter { !$0.isFloating && !$0.isMinimized }
-        guard !allTiledWindows.isEmpty else { return }
-
-        // Group windows by the monitor they're CURRENTLY on (respects user placement)
-        var windowsPerMonitor: [UInt32: [WindowNode]] = [:]
-        for monitor in tilingMonitors {
-            windowsPerMonitor[monitor.id] = []
-        }
-
-        for window in allTiledWindows {
-            if let monitor = monitorManager.monitorContaining(rect: window.frame),
-               tilingMonitorIDs.contains(monitor.id) {
-                windowsPerMonitor[monitor.id]?.append(window)
-            } else {
-                // Window not on any tiling monitor — assign to primary tiling monitor
-                windowsPerMonitor[tilingMonitors[0].id]?.append(window)
-            }
-        }
-
-        // For each monitor: rebuild BSP and apply frames
-        for monitor in tilingMonitors {
-            guard let wsID = workspaceManager.activeWorkspaceID(for: monitor.id),
-                  var workspace = workspaceManager.workspace(for: wsID) else { continue }
-
-            let monitorWindows = windowsPerMonitor[monitor.id] ?? []
-            let monitorWindowIDs = monitorWindows.map { $0.windowID }
-
-            // Only rebuild BSP tree if window membership changed (preserves swap ordering)
-            let currentIDs = Set(workspace.windowIDs)
-            let newIDs = Set(monitorWindowIDs)
-            if currentIDs != newIDs {
-                workspace.windowIDs = monitorWindowIDs
-                var newTree = BSPTree()
-                for wid in monitorWindowIDs {
-                    newTree.insert(windowID: wid)
-                }
-                workspace.layoutTree = newTree
-            }
-            workspaceManager.updateWorkspace(workspace)
-
-            for window in monitorWindows {
-                window.workspaceID = wsID
-                window.monitorID = monitor.id
-            }
-
-            guard !monitorWindowIDs.isEmpty else { continue }
-
-            let frames = workspace.layoutTree.computeFrames(
-                in: monitor.visibleFrame,
-                gaps: GapConfig(inner: layoutEngine.gapsInner, outer: layoutEngine.gapsOuter)
-            )
-
-            for (windowID, targetFrame) in frames {
-                guard let window = windowManager.window(for: windowID) else { continue }
-
-                let dx = abs(window.frame.origin.x - targetFrame.origin.x)
-                let dy = abs(window.frame.origin.y - targetFrame.origin.y)
-                let dw = abs(window.frame.size.width - targetFrame.size.width)
-                let dh = abs(window.frame.size.height - targetFrame.size.height)
-
-                if dx > 2 || dy > 2 || dw > 2 || dh > 2 {
-                    AccessibilityWrapper.setWindowFrame(window.axElement, frame: targetFrame)
-                }
-                window.targetFrame = targetFrame
-            }
-        }
-    }
-
     // MARK: - IPC
 
     private func handleIPCCommand(_ command: IPCCommand) -> IPCResponse {
         switch command {
         case .switchWorkspace(let id):
             switchWorkspace(id)
-            return IPCResponse(status: .ok, data: nil)
+            return IPCResponse(status: .ok)
 
         case .moveWindow(let workspaceID):
             moveToWorkspace(workspaceID)
-            return IPCResponse(status: .ok, data: nil)
+            return IPCResponse(status: .ok)
 
         case .listWindows:
             let windows = windowManager.allWindows.map { window in
@@ -684,26 +1310,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     frame: FrameInfo(x: window.frame.origin.x, y: window.frame.origin.y,
                                      width: window.frame.size.width, height: window.frame.size.height),
                     workspace: window.workspaceID,
-                    floating: window.isFloating
+                    floating: window.isFloating,
+                    pinned: window.isPinned,
+                    sticky: window.isSticky,
+                    tags: Array(window.tags)
                 )
             }
             return IPCResponse(status: .ok, data: .windows(windows))
 
         case .listWorkspaces:
             let workspaces = workspaceManager.allWorkspaces.map { ws in
-                WorkspaceInfo(id: ws.id, name: ws.name, windowCount: ws.windowIDs.count,
-                              monitorID: ws.monitorID, focused: ws.id == workspaceManager.activeWorkspace?.id)
+                WorkspaceInfo(
+                    id: ws.id, name: ws.name,
+                    windowCount: ws.windowIDs.count,
+                    monitorID: ws.monitorID,
+                    focused: ws.id == workspaceManager.activeWorkspace?.id,
+                    layout: ws.layoutMode.rawValue,
+                    workspaceType: ws.workspaceType.rawValue,
+                    masterRatio: ws.masterRatio,
+                    masterCount: ws.masterCount
+                )
             }
             return IPCResponse(status: .ok, data: .workspaces(workspaces))
 
         case .reloadConfig:
             reloadConfig()
-            return IPCResponse(status: .ok, data: nil)
+            return IPCResponse(status: .ok)
 
         case .getActiveWorkspace:
             if let ws = workspaceManager.activeWorkspace {
-                let info = WorkspaceInfo(id: ws.id, name: ws.name, windowCount: ws.windowIDs.count,
-                                         monitorID: ws.monitorID, focused: true)
+                let info = WorkspaceInfo(
+                    id: ws.id, name: ws.name,
+                    windowCount: ws.windowIDs.count,
+                    monitorID: ws.monitorID, focused: true,
+                    layout: ws.layoutMode.rawValue,
+                    workspaceType: ws.workspaceType.rawValue,
+                    masterRatio: ws.masterRatio,
+                    masterCount: ws.masterCount
+                )
                 return IPCResponse(status: .ok, data: .workspaces([info]))
             }
             return IPCResponse(status: .error, message: "No active workspace")
@@ -711,12 +1355,168 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .focusWindow(let windowID):
             if let window = windowManager.window(for: CGWindowID(windowID)) {
                 AccessibilityWrapper.focusWindow(window.axElement, pid: window.pid)
-                return IPCResponse(status: .ok, data: nil)
+                return IPCResponse(status: .ok)
             }
             return IPCResponse(status: .error, message: "Window not found")
 
+        case .toggleFloat:
+            toggleFloat()
+            return IPCResponse(status: .ok)
+
+        case .setLayout(let layout):
+            setLayout(layout)
+            return IPCResponse(status: .ok)
+
+        case .cycleLayout:
+            cycleLayout()
+            return IPCResponse(status: .ok)
+
+        case .renameWorkspace(let id, let name):
+            workspaceManager.renameWorkspace(id, to: name)
+            return IPCResponse(status: .ok)
+
+        case .createWorkspace(let name):
+            let monitor = monitorManager.primaryMonitor?.id ?? 0
+            let ws = workspaceManager.createWorkspace(name: name, monitorID: monitor)
+            return IPCResponse(status: .ok, message: "Created workspace \(ws.id): \(ws.name)")
+
+        case .getEventLog(let count):
+            let entries = EventLog.shared.recentEntries(count: count)
+            let events = entries.map { entry in
+                let formatter = ISO8601DateFormatter()
+                return EventInfo(
+                    timestamp: formatter.string(from: entry.timestamp),
+                    type: entry.type.rawValue,
+                    message: entry.message
+                )
+            }
+            return IPCResponse(status: .ok, data: .events(events))
+
+        case .toggleScratchpad(let name):
+            toggleScratchpad(name)
+            return IPCResponse(status: .ok)
+
+        case .listScratchpads:
+            let sps = scratchpadManager.allScratchpads().map { sp in
+                ScratchpadInfo(
+                    name: sp.name,
+                    app: sp.appName,
+                    bundleID: sp.bundleID,
+                    visible: scratchpadManager.isVisible(sp.name)
+                )
+            }
+            return IPCResponse(status: .ok, data: .scratchpads(sps))
+
+        case .saveSession:
+            sessionManager.saveSession(
+                workspaceManager: workspaceManager,
+                windowManager: windowManager,
+                tilingMode: currentTilingMode
+            )
+            return IPCResponse(status: .ok, message: "Session saved")
+
+        case .restoreSession:
+            if let session = sessionManager.loadSession() {
+                sessionManager.restoreWorkspaceMetadata(session: session, workspaceManager: workspaceManager)
+                sessionManager.matchAndRestoreWindows(session: session, windowManager: windowManager, workspaceManager: workspaceManager)
+                recomputeAllLayouts()
+                pluginManager.onSessionRestored()
+                return IPCResponse(status: .ok, message: "Session restored")
+            }
+            return IPCResponse(status: .error, message: "No saved session found")
+
+        case .listProfiles:
+            let names = profileManager.allProfiles().map { $0.name }
+            return IPCResponse(status: .ok, data: .profiles(names))
+
+        case .activateProfile(let name):
+            activateProfile(name)
+            return IPCResponse(status: .ok)
+
+        case .saveProfile(let name):
+            _ = profileManager.captureCurrentState(
+                name: name,
+                workspaceManager: workspaceManager,
+                layoutEngine: layoutEngine,
+                config: currentConfig,
+                scratchpadManager: scratchpadManager
+            )
+            return IPCResponse(status: .ok, message: "Profile '\(name)' saved")
+
+        case .getLayoutInfo:
+            if let ws = workspaceManager.activeWorkspace {
+                let info = LayoutInfo(
+                    mode: ws.layoutMode.rawValue,
+                    windowCount: ws.windowIDs.count,
+                    masterRatio: ws.masterRatio,
+                    masterCount: ws.masterCount,
+                    workspaceID: ws.id,
+                    workspaceName: ws.name
+                )
+                return IPCResponse(status: .ok, data: .layout(info))
+            }
+            return IPCResponse(status: .error, message: "No active workspace")
+
+        case .moveToMaster:
+            moveToMaster()
+            return IPCResponse(status: .ok)
+
+        case .rotateWindows(let dir):
+            rotateWindows(dir == "ccw" ? .counterClockwise : .clockwise)
+            return IPCResponse(status: .ok)
+
+        case .adjustMasterRatio(let delta):
+            adjustMasterRatio(delta: CGFloat(delta))
+            return IPCResponse(status: .ok)
+
+        case .adjustMasterCount(let delta):
+            adjustMasterCount(delta: delta)
+            return IPCResponse(status: .ok)
+
+        case .focusDirection(let dir):
+            if let direction = parseDirection(dir) { focusDirection(direction) }
+            return IPCResponse(status: .ok)
+
+        case .moveDirection(let dir):
+            if let direction = parseDirection(dir) { moveWindowDirection(direction) }
+            return IPCResponse(status: .ok)
+
+        case .growWidth:
+            resizeWindow(axis: .horizontal, delta: 0.05)
+            return IPCResponse(status: .ok)
+
+        case .shrinkWidth:
+            resizeWindow(axis: .horizontal, delta: -0.05)
+            return IPCResponse(status: .ok)
+
+        case .growHeight:
+            resizeWindow(axis: .vertical, delta: 0.05)
+            return IPCResponse(status: .ok)
+
+        case .shrinkHeight:
+            resizeWindow(axis: .vertical, delta: -0.05)
+            return IPCResponse(status: .ok)
+
+        case .normalize:
+            normalizeLayout()
+            return IPCResponse(status: .ok)
+
+        case .togglePseudoFullscreen:
+            togglePseudoFullscreen()
+            return IPCResponse(status: .ok)
+
         case .unknown(let cmd):
             return IPCResponse(status: .error, message: "Unknown command: \(cmd)")
+        }
+    }
+
+    private func parseDirection(_ str: String) -> Direction? {
+        switch str.lowercased() {
+        case "left": return .left
+        case "right": return .right
+        case "up": return .up
+        case "down": return .down
+        default: return nil
         }
     }
 }
@@ -725,14 +1525,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: WindowManagerDelegate {
     func windowManager(_ manager: WindowManager, didDetectNewWindow window: WindowNode) {
-        // Skip relayout during bootstrap — we'll do one clean pass after
         guard !isBootstrapping else { return }
 
-        NSLog("[SonicLand] New window: \(window.appName) - \(window.title ?? "untitled")")
+        EventLog.shared.log(.windowCreated,
+            "New window: \(window.appName) - \(window.title ?? "untitled")",
+            details: ["windowID": "\(window.windowID)", "bundleID": window.bundleID])
 
         ruleEngine.applyRules(to: window, workspaceManager: workspaceManager)
 
-        // Float windows that land on non-tiling monitors
+        // Check if this window should be a scratchpad
+        for sp in scratchpadManager.allScratchpads() {
+            if let bundleID = sp.bundleID, window.bundleID.lowercased() == bundleID.lowercased() {
+                scratchpadManager.assignWindow(window.windowID, toScratchpad: sp.name)
+                window.isFloating = true
+                break
+            }
+            if let appName = sp.appName, window.appName.lowercased().contains(appName.lowercased()) {
+                scratchpadManager.assignWindow(window.windowID, toScratchpad: sp.name)
+                window.isFloating = true
+                break
+            }
+        }
+
         let tilingMonitors = monitorManager.tilingMonitors(filter: currentTilingMode.monitorFilter)
         let tilingMonitorIDs = Set(tilingMonitors.map { $0.id })
         let windowMonitor = monitorManager.monitorContaining(rect: window.frame)
@@ -761,12 +1575,22 @@ extension AppDelegate: WindowManagerDelegate {
             }
         }
 
+        // Apply float geometry
+        if window.isFloating, let geo = window.floatGeometry {
+            if window.centerOnOpen, let monitor = monitorManager.primaryMonitor {
+                let x = monitor.visibleFrame.midX - geo.width / 2
+                let y = monitor.visibleFrame.midY - geo.height / 2
+                AccessibilityWrapper.setWindowFrame(window.axElement,
+                    frame: CGRect(x: x, y: y, width: geo.width, height: geo.height))
+            }
+        }
+
         recomputeAllLayouts()
         pluginManager?.onWindowCreated(window: window)
     }
 
     func windowManager(_ manager: WindowManager, didRemoveWindow windowID: CGWindowID) {
-        NSLog("[SonicLand] Window removed: \(windowID)")
+        EventLog.shared.log(.windowDestroyed, "Window removed: \(windowID)")
 
         for var ws in workspaceManager.allWorkspaces {
             if ws.windowIDs.contains(windowID) {
@@ -783,10 +1607,42 @@ extension AppDelegate: WindowManagerDelegate {
     func windowManager(_ manager: WindowManager, didFocusWindow windowID: CGWindowID) {
         if let window = windowManager.window(for: windowID) {
             workspaceManager.setFocusedWindow(windowID, in: window.workspaceID)
+
+            // Show focus ring
+            if currentConfig.overlay.showFocusRing {
+                if let frame = window.targetFrame ?? Optional(window.frame) {
+                    overlayManager.showFocusRing(frame: frame)
+                }
+            }
+
+            // Auto-hide scratchpads when focusing non-scratchpad windows
+            if !scratchpadManager.isScratchpadWindow(windowID) {
+                for w in windowManager.allWindows where w.windowID != windowID {
+                    scratchpadManager.handleFocusLost(windowID: w.windowID, windowManager: windowManager)
+                }
+            }
         }
     }
 
     func windowManagerNeedsRelayout(_ manager: WindowManager) {
         recomputeAllLayouts()
+    }
+}
+
+// MARK: - MonitorManagerDelegate
+
+extension AppDelegate: MonitorManagerDelegate {
+    func monitorManager(_ manager: MonitorManager, profileChangedTo profile: String) {
+        NSLog("[SonicLand] Monitor profile changed to: \(profile)")
+        pluginManager.onMonitorProfileChanged(profile: profile)
+
+        // Re-evaluate context rules immediately
+        let actions = ruleEngine.forceContextEvaluation(monitorManager: monitorManager)
+        for action in actions {
+            handleContextAction(action)
+        }
+
+        // Rebuild workspaces for new monitor configuration
+        applyTilingMode()
     }
 }

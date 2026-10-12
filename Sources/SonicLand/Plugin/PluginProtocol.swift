@@ -10,6 +10,10 @@ protocol SonicLandPlugin: AnyObject {
     func onWindowDestroyed(windowID: CGWindowID)
     func onWorkspaceChanged(from: Int, to: Int)
     func onLayoutComputed(workspaceID: Int, frames: [CGWindowID: CGRect])
+    func onLayoutModeChanged(workspaceID: Int, mode: LayoutMode)
+    func onMonitorProfileChanged(profile: String)
+    func onSessionRestored()
+    func onRuleMatched(windowID: CGWindowID, rule: String)
     func onTick()
 }
 
@@ -21,5 +25,9 @@ extension SonicLandPlugin {
     func onWindowDestroyed(windowID: CGWindowID) {}
     func onWorkspaceChanged(from: Int, to: Int) {}
     func onLayoutComputed(workspaceID: Int, frames: [CGWindowID: CGRect]) {}
+    func onLayoutModeChanged(workspaceID: Int, mode: LayoutMode) {}
+    func onMonitorProfileChanged(profile: String) {}
+    func onSessionRestored() {}
+    func onRuleMatched(windowID: CGWindowID, rule: String) {}
     func onTick() {}
 }
